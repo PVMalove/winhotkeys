@@ -1,0 +1,11 @@
+[project]
+name = "winhotkeys"
+version = "0.0.1"
+description = "Глобальные горячие клавиши для переключения между окнами программ на Windows (WinAPI через ctypes, без AutoHotkey/pywin32)"
+requires-python = ">=3.8"
+dependencies = [
+    "customtkinter>=5.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
