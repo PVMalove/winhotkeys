@@ -151,6 +151,22 @@ _visible_windows_cache: dict[tuple[int, frozenset[int]], tuple[float, list]] = {
 # ---- Горячие клавиши и очередь сообщений -----------------------------
 
 
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+
+
+def make_process_dpi_aware() -> bool:
+    """Помечает процесс per-monitor-v2 DPI aware. Без этого GetCursorPos/
+    GetMonitorInfo/GetSystemMetrics отдают виртуализированные (уменьшенные
+    под 96 DPI) координаты вместо физических пикселей — на масштабе,
+    отличном от 100%, это ломает любую математику вроде "курсор у края
+    монитора" (см. panel.py). Best-effort: на очень старых Windows атрибут
+    недоступен, тогда просто не помечаем — не должно ронять вызывающего."""
+    try:
+        return bool(user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+    except (AttributeError, OSError):
+        return False
+
+
 def register_hotkey(hotkey_id: int, modifiers: int, vk: int) -> bool:
     return bool(user32.RegisterHotKey(None, hotkey_id, modifiers | MOD_NOREPEAT, vk))
 

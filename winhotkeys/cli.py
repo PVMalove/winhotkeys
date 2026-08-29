@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -15,20 +14,23 @@ def _config_path(args: argparse.Namespace) -> Path:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    """Включение: поднимает слушатель горячих клавиш."""
+    """Включение: в фоне поднимает и слушатель горячих клавиш (Alt+1..9),
+    и резидентную боковую панель. --foreground — только про слушатель
+    (отладочный режим в текущей консоли), панель им не затрагивается."""
     config_path = _config_path(args)
     pid_path = daemon.default_pid_path()
 
     if args.foreground:
         cfg = config_mod.load_config(config_path)
-        print(f"Загружено привязок: {len(cfg)}. Alt+0 — меню всех программ. Работаю в этой консоли (Ctrl+C — остановить)...")
+        print(f"Загружено привязок: {len(cfg['binds'])}. Работаю в этой консоли (Ctrl+C — остановить)...")
         try:
-            daemon.run_loop(cfg, config_path=config_path)
+            daemon.run_loop(cfg["binds"])
         except KeyboardInterrupt:
             print("Остановлено пользователем.")
         return 0
 
     print(daemon.start_background(pid_path, config_path))
+    print(daemon.start_panel_background(daemon.default_panel_pid_path(), config_path))
     return 0
 
 
@@ -37,19 +39,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     внутри фонового процесса, запущенного из cmd_start."""
     config_path = _config_path(args)
     cfg = config_mod.load_config(config_path)
-    daemon.run_loop(cfg, config_path=config_path)
+    daemon.run_loop(cfg["binds"])
     return 0
 
 
-def cmd_overlay(args: argparse.Namespace) -> int:
-    """Служебная команда: показывает меню-оверлей (запускается из
-    daemon.open_overlay в отдельном процессе, чтобы не мешать GUI-лупу
-    tkinter циклу обработки хоткеев)."""
+def cmd_panel(args: argparse.Namespace) -> int:
+    """Служебная команда: резидентная боковая панель (запускается из
+    daemon.start_panel_background в отдельном фоновом процессе, один раз
+    при старте — не заново при каждом открытии)."""
     try:
-        from . import overlay
+        from . import panel
     except ImportError as exc:
         print(
-            f"Ошибка: не установлен customtkinter, нужен для меню Alt+0 ({exc}).\n"
+            f"Ошибка: не установлен PySide6, нужен для панели ({exc}).\n"
             "Установите: pip install -r requirements.txt",
             file=sys.stderr,
         )
@@ -57,36 +59,49 @@ def cmd_overlay(args: argparse.Namespace) -> int:
 
     config_path = _config_path(args)
     cfg = config_mod.load_config(config_path)
-    pid_path = daemon.default_overlay_pid_path()
+    panel.run(cfg, config_path)
+    return 0
+
+
+def cmd_settings(args: argparse.Namespace) -> int:
+    """Открывает окно настроек панели (раздел «Панель и Поведение»);
+    изменения применяются со следующего запуска (stop, затем start —
+    как и для изменений привязок)."""
     try:
-        overlay.show(cfg)
-    finally:
-        # Иначе после выхода pid-файл остаётся с "мёртвым" PID; если Windows
-        # позже переиспользует этот же номер для другого (любого) процесса,
-        # daemon.open_overlay ошибочно решит, что оверлей всё ещё открыт,
-        # и Alt+0 перестанет открывать окно вообще.
-        if daemon.read_pid(pid_path) == os.getpid():
-            pid_path.unlink(missing_ok=True)
+        from . import settings_window
+    except ImportError as exc:
+        print(
+            f"Ошибка: не установлен customtkinter, нужен для окна настроек ({exc}).\n"
+            "Установите: pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        return 1
+
+    settings_window.show(_config_path(args))
     return 0
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Выключение: останавливает фоновый слушатель, если он запущен."""
+    """Выключение: останавливает и слушатель, и резидентную панель, если
+    они запущены."""
     print(daemon.stop(daemon.default_pid_path()))
+    print(daemon.stop(daemon.default_panel_pid_path(), label="Панель", gender="f"))
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     print(daemon.status(daemon.default_pid_path()))
+    print(daemon.status(daemon.default_panel_pid_path(), label="Панель", gender="f"))
     return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
     cfg = config_mod.load_config(_config_path(args))
-    if not cfg:
+    binds = cfg["binds"]
+    if not binds:
         print("Привязок нет.")
         return 0
-    for number, bind in sorted(cfg.items()):
+    for number, bind in sorted(binds.items()):
         mods = "+".join(m.capitalize() for m in bind["modifiers"])
         processes = ", ".join(bind["processes"])
         print(f"{mods}+{number}  ->  {bind['name']}  (команда: {bind['command']}; процессы: {processes})")
@@ -99,8 +114,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     cfg = config_mod.load_config(config_path)
     modifiers = args.mod or ["alt"]
     try:
-        cfg = config_mod.add_bind(
-            cfg,
+        cfg["binds"] = config_mod.add_bind(
+            cfg["binds"],
             number=args.number,
             name=args.name,
             command=args.command,
@@ -122,7 +137,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     config_path = _config_path(args)
     cfg = config_mod.load_config(config_path)
     try:
-        cfg = config_mod.remove_bind(cfg, args.number)
+        cfg["binds"] = config_mod.remove_bind(cfg["binds"], args.number)
     except KeyError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
@@ -153,10 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", parents=[common], help=argparse.SUPPRESS)
     p_run.set_defaults(func=cmd_run)
 
-    p_overlay = sub.add_parser("overlay", parents=[common], help=argparse.SUPPRESS)
-    p_overlay.set_defaults(func=cmd_overlay)
+    p_panel = sub.add_parser("panel", parents=[common], help=argparse.SUPPRESS)
+    p_panel.set_defaults(func=cmd_panel)
 
-    p_stop = sub.add_parser("stop", help="Выключить прослушивание горячих клавиш")
+    p_settings = sub.add_parser("settings", parents=[common], help="Открыть окно настроек панели")
+    p_settings.set_defaults(func=cmd_settings)
+
+    p_stop = sub.add_parser("stop", help="Выключить прослушивание горячих клавиш и панель")
     p_stop.set_defaults(func=cmd_stop)
 
     p_status = sub.add_parser("status", help="Проверить, запущен ли слушатель")
@@ -166,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.set_defaults(func=cmd_list)
 
     p_add = sub.add_parser("add", parents=[common], help="Добавить/заменить привязку клавиши")
-    p_add.add_argument("number", help="Цифра 1-9 (0 зарезервирован под меню Alt+0)")
+    p_add.add_argument("number", help="Цифра 1-9 (0 зарезервирован под панель)")
     p_add.add_argument("name", help="Отображаемое имя программы")
     p_add.add_argument("command", help='Команда запуска, например code или "wt.exe -p PowerShell"')
     p_add.add_argument(

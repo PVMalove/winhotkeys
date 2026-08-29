@@ -111,42 +111,7 @@ def test_run_loop_unregisters_hotkeys_on_exit(monkeypatch):
     config = {"1": {"name": "VS Code", "command": "code", "processes": ["Code"], "modifiers": ["alt"]}}
     daemon.run_loop(config)
 
-    # id 0 — зарезервированное Alt+0 (меню), id 1 — привязка "1"
-    assert unregistered == [daemon.OVERLAY_HOTKEY_ID, 1]
-
-
-def test_run_loop_dispatches_alt_0_to_overlay(monkeypatch):
-    monkeypatch.setattr(win32api, "register_hotkey", lambda *a, **k: True)
-    monkeypatch.setattr(win32api, "unregister_hotkey", lambda *a, **k: None)
-    monkeypatch.setattr(win32api, "pump_message", lambda msg: None)
-
-    messages = [
-        (1, make_msg(win32api.WM_HOTKEY, wparam=daemon.OVERLAY_HOTKEY_ID)),
-        (0, make_msg(win32api.WM_QUIT)),
-    ]
-    monkeypatch.setattr(win32api, "get_message", lambda: messages.pop(0))
-
-    called = {}
-    monkeypatch.setattr(daemon, "open_overlay", lambda config_path=None: called.setdefault("opened", True))
-
-    config = {"1": {"name": "VS Code", "command": "code", "processes": ["Code"], "modifiers": ["alt"]}}
-    daemon.run_loop(config)
-
-    assert called.get("opened") is True
-
-
-def test_open_overlay_skips_when_already_open(tmp_path, monkeypatch):
-    pid_path = tmp_path / "overlay.pid"
-    pid_path.write_text("321")
-    monkeypatch.setattr(daemon, "default_overlay_pid_path", lambda: pid_path)
-    monkeypatch.setattr(daemon, "is_process_running", lambda pid: True)
-
-    def fail_popen(*a, **k):
-        raise AssertionError("Popen не должен вызываться, если оверлей уже открыт")
-
-    monkeypatch.setattr(daemon.subprocess, "Popen", fail_popen)
-
-    daemon.open_overlay()  # не должно бросить исключение
+    assert unregistered == [1]  # только привязка "1" — Alt+0 сюда больше не входит
 
 
 def test_stop_when_not_running_cleans_up_stale_pid_file(tmp_path, monkeypatch):
@@ -245,6 +210,49 @@ def test_start_background_launches_when_pid_reused_by_other_process(tmp_path, mo
 
     assert "запущен в фоне" in result
     assert pid_path.read_text() == "555"
+
+
+def test_start_panel_background_skips_when_already_running(tmp_path, monkeypatch):
+    pid_path = tmp_path / "panel.pid"
+    pid_path.write_text("123")
+    monkeypatch.setattr(daemon, "_is_our_daemon", lambda pid: True)
+
+    def fail_popen(*a, **k):
+        raise AssertionError("Popen не должен вызываться, если панель уже запущена")
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", fail_popen)
+
+    result = daemon.start_panel_background(pid_path, tmp_path / "config.json")
+
+    assert "уже запущена" in result
+
+
+def test_start_panel_background_launches_and_writes_pid(tmp_path, monkeypatch):
+    pid_path = tmp_path / "panel.pid"
+    monkeypatch.setattr(daemon, "_is_our_daemon", lambda pid: False)
+
+    class FakeProc:
+        pid = 777
+
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
+
+    result = daemon.start_panel_background(pid_path, tmp_path / "config.json")
+
+    assert "запущена в фоне" in result
+    assert pid_path.read_text() == "777"
+    assert captured["argv"][2] == "panel"  # спавнит именно служебную команду panel, не run
+
+
+def test_default_panel_pid_path_differs_from_daemon(monkeypatch):
+    monkeypatch.setenv("APPDATA", r"C:\fake")
+    assert daemon.default_panel_pid_path().name == "panel.pid"
+    assert daemon.default_panel_pid_path() != daemon.default_pid_path()
 
 
 def test_is_our_daemon_matches_by_python_executable_name(monkeypatch):

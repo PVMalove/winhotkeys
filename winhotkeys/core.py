@@ -32,3 +32,44 @@ def find_index(windows: list, active_window) -> int | None:
         return windows.index(active_window)
     except ValueError:
         return None
+
+
+EDGE_THRESHOLD_PX = 6
+HOVER_DWELL_S = 0.25
+
+
+def is_cursor_at_edge(
+    cursor_x: int,
+    monitor_left: int,
+    monitor_right: int,
+    side: str,
+    threshold_px: int = EDGE_THRESHOLD_PX,
+) -> bool:
+    """Находится ли курсор в узкой зоне у настроенного края монитора —
+    общая проверка для триггеров "edge-slide" и "hover" (разница между
+    ними — в EdgeDwellTracker ниже, не здесь)."""
+    if side == "right":
+        return cursor_x >= monitor_right - threshold_px
+    if side == "left":
+        return cursor_x <= monitor_left + threshold_px
+    raise ValueError(f"неизвестная сторона панели: {side}")
+
+
+class EdgeDwellTracker:
+    """Для триггера "hover": в отличие от "edge-slide" (срабатывает
+    мгновенно при касании края), панель должна показаться только после
+    того, как курсор непрерывно провёл в зоне края не менее dwell_seconds.
+    Время инжектируется (не time.monotonic() внутри) — тестируется без
+    реальных задержек."""
+
+    def __init__(self, dwell_seconds: float = HOVER_DWELL_S):
+        self._dwell_seconds = dwell_seconds
+        self._entered_at: float | None = None
+
+    def update(self, in_zone: bool, now: float) -> bool:
+        if not in_zone:
+            self._entered_at = None
+            return False
+        if self._entered_at is None:
+            self._entered_at = now
+        return now - self._entered_at >= self._dwell_seconds

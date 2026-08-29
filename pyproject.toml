@@ -5,6 +5,8 @@ description = "Глобальные горячие клавиши для пер�
 requires-python = ">=3.8"
 dependencies = [
     "customtkinter>=5.2",
+    "Pillow",
+    "PySide6>=6.5",
 ]
 
 [project.optional-dependencies]

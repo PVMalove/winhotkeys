@@ -33,3 +33,24 @@ def test_get_visible_windows_for_pids_returns_empty_when_no_match(monkeypatch):
     result = win32api.get_visible_windows_for_pids({100})
 
     assert result == []
+
+
+def test_make_process_dpi_aware_calls_winapi_and_reports_success(monkeypatch):
+    monkeypatch.setattr(win32api.user32, "SetProcessDpiAwarenessContext", lambda ctx: 1)
+
+    assert win32api.make_process_dpi_aware() is True
+
+
+def test_make_process_dpi_aware_reports_failure_without_raising(monkeypatch):
+    monkeypatch.setattr(win32api.user32, "SetProcessDpiAwarenessContext", lambda ctx: 0)
+
+    assert win32api.make_process_dpi_aware() is False
+
+
+def test_make_process_dpi_aware_survives_missing_winapi_on_old_windows(monkeypatch):
+    def raise_missing(ctx):
+        raise AttributeError("SetProcessDpiAwarenessContext")
+
+    monkeypatch.setattr(win32api.user32, "SetProcessDpiAwarenessContext", raise_missing)
+
+    assert win32api.make_process_dpi_aware() is False

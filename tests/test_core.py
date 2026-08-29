@@ -1,6 +1,11 @@
 import pytest
 
-from winhotkeys.core import find_index, pick_next_action
+from winhotkeys.core import (
+    EdgeDwellTracker,
+    find_index,
+    is_cursor_at_edge,
+    pick_next_action,
+)
 
 
 def test_no_active_window_focuses_first():
@@ -42,3 +47,48 @@ def test_find_index_not_found():
 
 def test_find_index_no_active_window():
     assert find_index([10, 20, 30], None) is None
+
+
+def test_is_cursor_at_edge_right_side_true_near_edge():
+    assert is_cursor_at_edge(1914, 0, 1920, "right", threshold_px=6) is True
+
+
+def test_is_cursor_at_edge_right_side_false_away_from_edge():
+    assert is_cursor_at_edge(1000, 0, 1920, "right", threshold_px=6) is False
+
+
+def test_is_cursor_at_edge_left_side_true_near_edge():
+    assert is_cursor_at_edge(3, 0, 1920, "left", threshold_px=6) is True
+
+
+def test_is_cursor_at_edge_left_side_false_away_from_edge():
+    assert is_cursor_at_edge(500, 0, 1920, "left", threshold_px=6) is False
+
+
+def test_is_cursor_at_edge_rejects_unknown_side():
+    with pytest.raises(ValueError):
+        is_cursor_at_edge(0, 0, 1920, "top")
+
+
+def test_edge_dwell_tracker_requires_continuous_presence():
+    tracker = EdgeDwellTracker(dwell_seconds=0.25)
+    assert tracker.update(True, now=0.0) is False
+    assert tracker.update(True, now=0.1) is False
+    assert tracker.update(True, now=0.25) is True
+
+
+def test_edge_dwell_tracker_resets_when_cursor_leaves_zone():
+    tracker = EdgeDwellTracker(dwell_seconds=0.25)
+    assert tracker.update(True, now=0.0) is False
+    assert tracker.update(False, now=0.1) is False
+    # Курсор вернулся в зону — отсчёт должен начаться заново, а не
+    # продолжиться с прежней точки.
+    assert tracker.update(True, now=0.2) is False
+    assert tracker.update(True, now=0.44) is False
+    assert tracker.update(True, now=0.45) is True
+
+
+def test_edge_dwell_tracker_never_in_zone_stays_false():
+    tracker = EdgeDwellTracker(dwell_seconds=0.25)
+    assert tracker.update(False, now=0.0) is False
+    assert tracker.update(False, now=10.0) is False

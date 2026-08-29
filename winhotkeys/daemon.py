@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -14,14 +15,31 @@ from . import win32api
 from .core import find_index, pick_next_action
 
 PID_FILE_NAME = "daemon.pid"
-OVERLAY_PID_FILE_NAME = "overlay.pid"
+PANEL_PID_FILE_NAME = "panel.pid"
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-# Alt+0 зарезервирован под меню-оверлей (см. overlay.py), не участвует в
-# пользовательских привязках (config.validate_bind запрещает номер "0").
-OVERLAY_HOTKEY_ID = 0
-OVERLAY_VK = 0x30  # VK_0
+# Локальный UDP-порт, на котором (если запущена) слушает панель —
+# уведомление "только что переключились на привязку N" по Alt+N, чтобы
+# панель открылась и подсветила соответствующую иконку (см. panel.py).
+# Обычный socket из стандартной библиотеки — daemon.py намеренно не
+# зависит ни от одного стороннего GUI-пакета, чтобы Alt+1..9 работали,
+# даже если PySide6/customtkinter не установлены.
+PANEL_NOTIFY_PORT = 51823
+
+
+def notify_panel_switch(number: str) -> None:
+    """Best-effort уведомление панели о переключении по Alt+N. Ничего не
+    делает, если панель не запущена/не слушает — это datagram на
+    localhost, а не запрос, ответа не ждём и ошибку не считаем фатальной."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.sendto(number.encode("ascii"), ("127.0.0.1", PANEL_NOTIFY_PORT))
+        finally:
+            sock.close()
+    except OSError:
+        pass
 
 
 def default_pid_path() -> Path:
@@ -29,9 +47,9 @@ def default_pid_path() -> Path:
     return Path(base) / "winhotkeys" / PID_FILE_NAME
 
 
-def default_overlay_pid_path() -> Path:
+def default_panel_pid_path() -> Path:
     base = os.environ.get("APPDATA", str(Path.home()))
-    return Path(base) / "winhotkeys" / OVERLAY_PID_FILE_NAME
+    return Path(base) / "winhotkeys" / PANEL_PID_FILE_NAME
 
 
 def is_process_running(pid: int) -> bool:
@@ -72,26 +90,36 @@ def read_pid(pid_path: Path) -> int | None:
         return None
 
 
-def status(pid_path: Path) -> str:
+# Формы причастий по родам — для status()/stop() с label="Панель" (ж.р.)
+# наряду с дефолтным label="Слушатель" (м.р.), без дублирования сообщений.
+_PARTICIPLES = {
+    "m": {"running": "запущен", "was_running": "был запущен", "stopped": "остановлен"},
+    "f": {"running": "запущена", "was_running": "была запущена", "stopped": "остановлена"},
+}
+
+
+def status(pid_path: Path, label: str = "Слушатель", gender: str = "m") -> str:
+    forms = _PARTICIPLES[gender]
     pid = read_pid(pid_path)
     if pid is not None and _is_our_daemon(pid):
-        return f"Слушатель запущен (PID {pid})"
-    return "Слушатель не запущен"
+        return f"{label} {forms['running']} (PID {pid})"
+    return f"{label} не {forms['running']}"
 
 
-def stop(pid_path: Path) -> str:
+def stop(pid_path: Path, label: str = "Слушатель", gender: str = "m") -> str:
+    forms = _PARTICIPLES[gender]
     pid = read_pid(pid_path)
     if pid is None or not is_process_running(pid):
         pid_path.unlink(missing_ok=True)
-        return "Слушатель не был запущен"
+        return f"{label} не {forms['was_running']}"
 
     if not _is_our_daemon(pid):
         # PID из pid-файла Windows уже отдала другому процессу — настоящий
-        # демон, скорее всего, уже завершился сам. Не трогаем чужой процесс.
+        # процесс, скорее всего, уже завершился сам. Не трогаем чужой процесс.
         pid_path.unlink(missing_ok=True)
         return (
-            f"Слушатель не был запущен (PID {pid} в pid-файле уже "
-            "принадлежит другому процессу, вероятно демон завершился сам)"
+            f"{label} не {forms['was_running']} (PID {pid} в pid-файле уже "
+            "принадлежит другому процессу, вероятно завершился сам)"
         )
 
     try:
@@ -101,60 +129,47 @@ def stop(pid_path: Path) -> str:
         return f"Не удалось остановить процесс PID {pid} ({exc}); pid-файл очищен"
 
     pid_path.unlink(missing_ok=True)
-    return f"Слушатель (PID {pid}) остановлен"
+    return f"{label} (PID {pid}) {forms['stopped']}"
 
 
-def start_background(pid_path: Path, config_path: Path) -> str:
-    """Включение: поднимает слушатель в отдельном фоновом процессе
-    (без консольного окна) и запоминает его PID."""
+def _spawn_background_service(
+    pid_path: Path, config_path: Path, subcommand: str, label: str, started_word: str
+) -> str:
+    """Общий boilerplate запуска фонового сервиса (демон хоткеев или
+    резидентная панель): не плодит второй процесс, если наш уже запущен
+    (pid-файл + _is_our_daemon), иначе спавнит `run.py <subcommand>` без
+    консольного окна и запоминает PID."""
     existing = read_pid(pid_path)
     if existing is not None and _is_our_daemon(existing):
-        return f"Слушатель уже запущен (PID {existing})"
+        return f"{label} уже {started_word} (PID {existing})"
 
     entry_script = Path(__file__).resolve().parent.parent / "run.py"
     creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
     proc = subprocess.Popen(
-        [sys.executable, str(entry_script), "run", "--config", str(config_path)],
+        [sys.executable, str(entry_script), subcommand, "--config", str(config_path)],
         creationflags=creationflags,
         close_fds=True,
     )
 
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(proc.pid))
-    return f"Слушатель запущен в фоне (PID {proc.pid})"
+    return f"{label} {started_word} в фоне (PID {proc.pid})"
+
+
+def start_background(pid_path: Path, config_path: Path) -> str:
+    """Включение: поднимает слушатель горячих клавиш (Alt+1..9) в отдельном
+    фоновом процессе."""
+    return _spawn_background_service(pid_path, config_path, "run", "Слушатель", "запущен")
+
+
+def start_panel_background(pid_path: Path, config_path: Path) -> str:
+    """Включение: поднимает резидентную боковую панель в отдельном фоновом
+    процессе — один раз при старте, а не заново при каждом открытии."""
+    return _spawn_background_service(pid_path, config_path, "panel", "Панель", "запущена")
 
 
 def launch_app(command: str) -> None:
     subprocess.Popen(command, shell=True)
-
-
-def open_overlay(config_path: Path | None = None) -> None:
-    """Показывает меню-оверлей (Alt+0) в отдельном коротком процессе.
-
-    Не плодит окна, если оверлей уже открыт (проверка по своему pid-файлу).
-    Вывод (в т.ч. ошибки — например, если не установлен customtkinter)
-    уходит в overlay.log, иначе в фоновом процессе он был бы просто потерян.
-    """
-    pid_path = default_overlay_pid_path()
-    existing = read_pid(pid_path)
-    if existing is not None and is_process_running(existing):
-        return
-
-    entry_script = Path(__file__).resolve().parent.parent / "run.py"
-    args = [sys.executable, str(entry_script), "overlay"]
-    if config_path is not None:
-        args += ["--config", str(config_path)]
-
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path = pid_path.parent / "overlay.log"
-    with open(log_path, "a", encoding="utf-8") as log_file:
-        proc = subprocess.Popen(
-            args,
-            stdout=log_file,
-            stderr=log_file,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-    pid_path.write_text(str(proc.pid))
 
 
 def switch_to_app(
@@ -182,24 +197,17 @@ def switch_to_app(
         win32api.restore_and_focus(windows[index])
 
 
-def run_loop(config: dict[str, Any], config_path: Path | None = None) -> None:
-    """Регистрирует все привязки плюс Alt+0 (меню-оверлей) и блокирующе
-    ждёт нажатий (GetMessage — поток спит в ядре, не polling).
-    Возврат — по WM_QUIT."""
-    hotkey_map: dict[int, dict[str, Any]] = {}
+def run_loop(config: dict[str, Any]) -> None:
+    """Регистрирует все привязки (Alt+1..9) и блокирующе ждёт нажатий
+    (GetMessage — поток спит в ядре, не polling). Возврат — по WM_QUIT.
+
+    config — плоский словарь биндов (cfg["binds"], не весь конфиг с
+    настройками панели)."""
+    hotkey_map: dict[int, tuple[str, dict[str, Any]]] = {}
     registered: list[int] = []
     hotkey_id = 1
 
     try:
-        if win32api.register_hotkey(
-            OVERLAY_HOTKEY_ID, win32api.MODIFIERS["alt"], OVERLAY_VK
-        ):
-            registered.append(OVERLAY_HOTKEY_ID)
-        else:
-            print(
-                "Не удалось зарегистрировать Alt+0 (меню) — комбинация уже занята другой программой"
-            )
-
         for number, bind in config.items():
             vk = 0x30 + int(number)  # VK_0..VK_9
             mods = 0
@@ -207,7 +215,7 @@ def run_loop(config: dict[str, Any], config_path: Path | None = None) -> None:
                 mods |= win32api.MODIFIERS[mod_name]
 
             if win32api.register_hotkey(hotkey_id, mods, vk):
-                hotkey_map[hotkey_id] = bind
+                hotkey_map[hotkey_id] = (number, bind)
                 registered.append(hotkey_id)
             else:
                 print(
@@ -225,12 +233,11 @@ def run_loop(config: dict[str, Any], config_path: Path | None = None) -> None:
             if result == 0:
                 break
             if msg.message == win32api.WM_HOTKEY:
-                if msg.wParam == OVERLAY_HOTKEY_ID:
-                    open_overlay(config_path)
-                else:
-                    bind = hotkey_map.get(msg.wParam)
-                    if bind is not None:
-                        switch_to_app(bind)
+                entry = hotkey_map.get(msg.wParam)
+                if entry is not None:
+                    number, bind = entry
+                    switch_to_app(bind)
+                    notify_panel_switch(number)
             win32api.pump_message(msg)
     finally:
         for hid in registered:
